@@ -20,13 +20,6 @@ library(car)
 theme_set(theme_minimal(base_size = 12))
 ```
 
-<!--
-📝 使用说明（这些注释不会出现在生成的报告里）
-- 点 RStudio 上方的 Knit 按钮生成 HTML；点 Knit 旁边的小箭头可以选 Knit to Word
-- 所有解释文字都已经写好，建议通读一遍，改成你自己的说话习惯
-- 数字不要手打，用 R 行内代码（反引号 + r + 空格 + 表达式）自动引用，数据变了报告也会跟着变
--->
-
 # Introduction
 
 Home-court advantage is one of the most consistent patterns in sports: NBA home teams
@@ -66,7 +59,7 @@ teams, final scores, and reported attendance.
 games <- games |>
   mutate(
     home_win = as.integer(home_score > away_score),
-    margin   = home_score - away_score,           # 主队净胜分
+    margin   = home_score - away_score,           # home point margin
     bubble   = venue == "ESPN Wide World of Sports Complex",
     crowd = case_when(
       bubble                                   ~ "Bubble (neutral, no fans)",
@@ -227,12 +220,12 @@ pt
 ```
 
 ```{r t-test}
-tt <- t.test(full$margin, nofans$margin)   # 默认就是 Welch t-test（不假设方差相等）
+tt <- t.test(full$margin, nofans$margin)   # Welch t-test by default (does not assume equal variances)
 tt
 ```
 
 ```{r bubble-test}
-# 泡泡园区：主队胜率是否显著不同于 50%？
+# Bubble: is the home win rate significantly different from 50%?
 binom.test(sum(bubble$home_win), nrow(bubble), p = 0.5)
 ```
 
@@ -268,7 +261,8 @@ tidy(logit, exponentiate = TRUE, conf.int = TRUE) |>
 ```
 
 ```{r logit-pred}
-# 把结果翻译成概率：两支实力相当的球队（strength_diff = 0）在常规赛中，主队胜率是多少？
+# Convert to probabilities: predicted home win % for two evenly matched teams
+# (strength_diff = 0) in a regular-season game
 newdata <- tibble(crowd = factor(levels(games$crowd), levels = levels(games$crowd)),
                   strength_diff = 0, playoffs = FALSE)
 newdata |>
@@ -282,7 +276,7 @@ newdata |>
 or_tab <- tidy(logit, exponentiate = TRUE, conf.int = TRUE)
 or_nofans <- or_tab |> filter(term == "crowdHome arena, no fans")
 or_bubble <- or_tab |> filter(term == "crowdBubble (neutral, no fans)")
-or_strength_01 <- exp(0.1 * coef(logit)["strength_diff"])   # 胜率差每增加 0.1
+or_strength_01 <- exp(0.1 * coef(logit)["strength_diff"])   # odds ratio per 0.1 increase in win% difference
 ```
 
 Holding team strength and game type constant, the odds of a home win in a home arena
@@ -335,11 +329,12 @@ par(mfrow = c(1, 1))
 ```
 
 ```{r vif}
-vif(lm_margin)   # GVIF^(1/(2*Df)) 小于 ~2 说明没有严重的多重共线性
+vif(lm_margin)   # GVIF^(1/(2*Df)) below ~2 means no serious multicollinearity
 ```
 
 ```{r logit-calibration}
-# Logistic 回归的校准检查：把预测概率分成 10 组，比较预测胜率和实际胜率
+# Calibration check: split predicted probabilities into 10 groups and
+# compare predicted vs. observed home win rates
 games |>
   mutate(pred = predict(logit, type = "response"),
          bin  = ntile(pred, 10)) |>
