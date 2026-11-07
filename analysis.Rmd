@@ -1,0 +1,421 @@
+---
+title: "Does Home-Court Advantage Disappear Without Fans? Evidence from the NBA, 2015–2025"
+author: "Nan Xiao"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+  word_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 8, fig.height = 4.5)
+library(tidyverse)
+library(broom)
+library(car)
+theme_set(theme_minimal(base_size = 12))
+```
+
+<!--
+📝 使用说明（这些注释不会出现在生成的报告里）
+- 点 RStudio 上方的 Knit 按钮生成 HTML；点 Knit 旁边的小箭头可以选 Knit to Word
+- 所有解释文字都已经写好，建议通读一遍，改成你自己的说话习惯
+- 数字不要手打，用 R 行内代码（反引号 + r + 空格 + 表达式）自动引用，数据变了报告也会跟着变
+-->
+
+# Introduction
+
+Home-court advantage is one of the most consistent patterns in sports: NBA home teams
+historically win roughly 58–60% of games. But *why* home teams win is debated. Possible
+explanations include crowd support, referee bias influenced by crowds, travel fatigue
+for the visiting team, and familiarity with the arena.
+
+The COVID-19 pandemic created a **natural experiment**. From July to October 2020 the NBA
+finished its season in a "bubble" at a neutral site with no fans, and for much of the
+2020–21 season teams played in their own arenas with no or limited fans. This lets us
+separate the effect of **crowds** from the effect of **travel and familiarity**.
+
+**Research questions**
+
+1. Was the home team's winning percentage lower in games played without fans?
+2. Does this difference remain after controlling for the relative strength of the two teams?
+3. Does playing in the home arena *without* fans still give an advantage, compared with the neutral-site bubble?
+
+This question matters beyond basketball trivia. If fans are the main source of home-court
+advantage, then crowds have a measurable effect on game outcomes, which is relevant for
+sports betting models, ticket pricing, and how leagues think about scheduling and referee training.
+
+# Data
+
+```{r load}
+games <- read_csv("data/nba_games_2015_2025.csv")
+```
+
+The data come from ESPN via the `hoopR` R package and cover all completed regular-season and
+playoff games from the 2014–15 season through the 2024–25 season
+(**`r format(nrow(games), big.mark = ",")` games**). Each row is one game, with the home and away
+teams, final scores, and reported attendance.
+
+## Defining the crowd condition
+
+```{r clean}
+games <- games |>
+  mutate(
+    home_win = as.integer(home_score > away_score),
+    margin   = home_score - away_score,           # 主队净胜分
+    bubble   = venue == "ESPN Wide World of Sports Complex",
+    crowd = case_when(
+      bubble                                   ~ "Bubble (neutral, no fans)",
+      season == 2021 & attendance == 0         ~ "Home arena, no fans",
+      season == 2021 & attendance < 10000      ~ "Limited fans",
+      TRUE                                     ~ "Full crowd"
+    ),
+    crowd = factor(crowd, levels = c("Full crowd", "Limited fans",
+                                     "Home arena, no fans", "Bubble (neutral, no fans)")),
+    playoffs = season_type == "Playoffs"
+  )
+
+games |> count(crowd) |> knitr::kable(col.names = c("Crowd condition", "Games"))
+```
+
+- **Bubble**: all games at the Orlando bubble (July–October 2020). Neither team is really "at home".
+- **Home arena, no fans**: 2020–21 season games with reported attendance of zero.
+- **Limited fans**: 2020–21 games with between 1 and 9,999 fans.
+- **Full crowd**: all other games.
+
+A small number of zero-attendance games outside 2020–21 are likely data-entry errors and are
+treated as full-crowd games.
+
+## Controlling for team strength
+
+Better teams win more often regardless of location, so we need a measure of team quality.
+For each team-season we compute the team's overall regular-season winning percentage, and
+define `strength_diff` = home team win% − away team win%.
+
+```{r strength}
+team_season <- games |>
+  filter(season_type == "Regular") |>
+  select(season, home_team, away_team, home_win) |>
+  pivot_longer(c(home_team, away_team), names_to = "side", values_to = "team") |>
+  mutate(win = if_else(side == "home_team", home_win, 1L - home_win)) |>
+  group_by(season, team) |>
+  summarise(win_pct = mean(win), .groups = "drop")
+
+games <- games |>
+  left_join(team_season, by = c("season", "home_team" = "team")) |>
+  rename(home_wpct = win_pct) |>
+  left_join(team_season, by = c("season", "away_team" = "team")) |>
+  rename(away_wpct = win_pct) |>
+  mutate(strength_diff = home_wpct - away_wpct)
+```
+
+# Exploratory Data Analysis
+
+## Home win percentage by season
+
+```{r eda-season}
+games |>
+  group_by(season) |>
+  summarise(home_win_pct = mean(home_win), n = n()) |>
+  ggplot(aes(season, home_win_pct)) +
+  geom_line(color = "grey50") +
+  geom_point(size = 3, color = "#1d428a") +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+  annotate("rect", xmin = 2019.6, xmax = 2021.4, ymin = -Inf, ymax = Inf,
+           alpha = 0.1, fill = "orange") +
+  annotate("text", x = 2020.5, y = 0.62, label = "COVID seasons", size = 3.5) +
+  scale_x_continuous(breaks = 2015:2025) +
+  scale_y_continuous(labels = scales::percent, limits = c(0.45, 0.65)) +
+  labs(x = "Season (ending year)", y = "Home win %",
+       title = "Home team winning percentage by season")
+```
+
+```{r era}
+era <- games |>
+  mutate(era = case_when(season <= 2019 ~ "Pre-COVID (2015–2019)",
+                         season >= 2022 ~ "Post-COVID (2022–2025)",
+                         TRUE           ~ "COVID (2020–2021)")) |>
+  group_by(era) |>
+  summarise(home_win_pct = mean(home_win), games = n())
+pre_pct  <- era$home_win_pct[era$era == "Pre-COVID (2015–2019)"]
+post_pct <- era$home_win_pct[era$era == "Post-COVID (2022–2025)"]
+```
+
+Before COVID, home teams won about `r scales::percent(pre_pct, 0.1)` of games. The rate
+dropped during the 2020 and 2021 seasons, but it did **not** fully bounce back once fans
+returned: from 2022 to 2025 home teams won only `r scales::percent(post_pct, 0.1)` of games.
+This suggests home-court advantage was already shrinking for reasons unrelated to COVID
+(for example, better travel and sleep management, or more three-point shooting, which adds
+randomness). We keep this trend in mind when interpreting the no-fan effect.
+
+## Home win percentage and point margin by crowd condition
+
+```{r eda-crowd}
+crowd_summary <- games |>
+  group_by(crowd) |>
+  summarise(
+    games        = n(),
+    home_win_pct = mean(home_win),
+    se           = sqrt(home_win_pct * (1 - home_win_pct) / games),
+    avg_margin   = mean(margin)
+  )
+
+crowd_summary |>
+  mutate(home_win_pct = scales::percent(home_win_pct, 0.1),
+         se = round(se, 3), avg_margin = round(avg_margin, 2)) |>
+  knitr::kable(col.names = c("Crowd", "Games", "Home win %", "SE", "Avg home margin"))
+
+ggplot(crowd_summary, aes(crowd, home_win_pct)) +
+  geom_col(fill = "#1d428a", width = 0.6) +
+  geom_errorbar(aes(ymin = home_win_pct - 1.96 * se, ymax = home_win_pct + 1.96 * se),
+                width = 0.15) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", color = "red") +
+  scale_y_continuous(labels = scales::percent) +
+  coord_cartesian(ylim = c(0.35, 0.65)) +
+  labs(x = NULL, y = "Home win % (95% CI)",
+       title = "Home win percentage by crowd condition")
+```
+
+## Distribution of home point margin
+
+```{r eda-margin}
+games |>
+  filter(crowd %in% c("Full crowd", "Home arena, no fans")) |>
+  ggplot(aes(margin, fill = crowd)) +
+  geom_density(alpha = 0.4) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  labs(x = "Home score − away score", y = "Density", fill = NULL,
+       title = "Home point margin: full crowd vs. no fans") +
+  theme(legend.position = "top")
+```
+
+Both distributions are roughly bell-shaped and have similar spreads (SD of about
+`r round(sd(games$margin[games$crowd == "Full crowd"]), 1)` points with a full crowd and
+`r round(sd(games$margin[games$crowd == "Home arena, no fans"]), 1)` without fans).
+The no-fan curve is shifted slightly to the left, meaning home teams won by fewer points.
+The shift is small compared with the overall spread, so any single game is still very
+unpredictable. Since the samples are large and the shapes are close to normal, a t-test
+is appropriate here.
+
+# Methods
+
+1. **Two-proportion z-test**: compare the home win rate in full-crowd games vs. no-fan games.
+2. **Welch two-sample t-test**: compare the average home point margin.
+3. **Logistic regression**: model the probability of a home win as a function of crowd
+   condition, controlling for team strength difference and playoff games.
+4. **Linear regression**: model the home point margin with the same predictors, as a robustness check.
+
+# Results
+
+## Hypothesis tests
+
+**H₀:** the home win probability is the same with and without fans.
+**H₁:** the home win probability is different.
+
+```{r prop-test}
+full   <- games |> filter(crowd == "Full crowd")
+nofans <- games |> filter(crowd == "Home arena, no fans")
+bubble <- games |> filter(crowd == "Bubble (neutral, no fans)")
+
+pt <- prop.test(x = c(sum(full$home_win), sum(nofans$home_win)),
+                n = c(nrow(full), nrow(nofans)))
+pt
+```
+
+```{r t-test}
+tt <- t.test(full$margin, nofans$margin)   # 默认就是 Welch t-test（不假设方差相等）
+tt
+```
+
+```{r bubble-test}
+# 泡泡园区：主队胜率是否显著不同于 50%？
+binom.test(sum(bubble$home_win), nrow(bubble), p = 0.5)
+```
+
+The home win rate was `r scales::percent(mean(full$home_win), 0.1)` with a full crowd and
+`r scales::percent(mean(nofans$home_win), 0.1)` in home arenas without fans
+(p = `r signif(pt$p.value, 3)`). The average home margin fell from
+`r round(mean(full$margin), 2)` to `r round(mean(nofans$margin), 2)` points
+(p = `r signif(tt$p.value, 3)`).
+
+Both p-values are well below 0.05, so we **reject H₀**: home teams did significantly worse
+without fans. The difference is also meaningful in practice. A drop of about
+`r round(100 * (mean(full$home_win) - mean(nofans$home_win)), 1)` percentage points means that,
+without fans, the home team was barely more likely to win than a coin flip. In the bubble,
+the home win rate was also not significantly different from 50%, which makes sense because
+the "home" team was just a label there.
+
+## Logistic regression
+
+$$\log\frac{P(\text{home win})}{1-P(\text{home win})} = \beta_0 + \beta_1\,\text{crowd} + \beta_2\,\text{strength\_diff} + \beta_3\,\text{playoffs}$$
+
+```{r logit}
+logit <- glm(home_win ~ crowd + strength_diff + playoffs,
+             data = games, family = binomial)
+summary(logit)
+```
+
+Odds ratios with 95% confidence intervals:
+
+```{r logit-or}
+tidy(logit, exponentiate = TRUE, conf.int = TRUE) |>
+  mutate(across(where(is.numeric), \(x) round(x, 3))) |>
+  knitr::kable()
+```
+
+```{r logit-pred}
+# 把结果翻译成概率：两支实力相当的球队（strength_diff = 0）在常规赛中，主队胜率是多少？
+newdata <- tibble(crowd = factor(levels(games$crowd), levels = levels(games$crowd)),
+                  strength_diff = 0, playoffs = FALSE)
+newdata |>
+  mutate(pred_home_win = predict(logit, newdata, type = "response")) |>
+  mutate(pred_home_win = scales::percent(pred_home_win, 0.1)) |>
+  select(crowd, pred_home_win) |>
+  knitr::kable(col.names = c("Crowd", "Predicted home win % (evenly matched teams)"))
+```
+
+```{r logit-numbers, include=FALSE}
+or_tab <- tidy(logit, exponentiate = TRUE, conf.int = TRUE)
+or_nofans <- or_tab |> filter(term == "crowdHome arena, no fans")
+or_bubble <- or_tab |> filter(term == "crowdBubble (neutral, no fans)")
+or_strength_01 <- exp(0.1 * coef(logit)["strength_diff"])   # 胜率差每增加 0.1
+```
+
+Holding team strength and game type constant, the odds of a home win in a home arena
+without fans were about **`r round(or_nofans$estimate, 2)` times** the odds with a full crowd
+(95% CI: `r round(or_nofans$conf.low, 2)` to `r round(or_nofans$conf.high, 2)`). Since the
+whole interval is below 1, the drop is statistically significant. The bubble estimate is
+similar (OR = `r round(or_bubble$estimate, 2)`), but its interval includes 1 because there
+were only `r nrow(bubble)` bubble games. Games with limited fans did not differ significantly
+from full-crowd games, which suggests even a small crowd may be enough to restore some advantage.
+
+Team strength is by far the strongest predictor. A 0.1 increase in `strength_diff` (for example,
+a .600 team hosting a .500 team) multiplies the odds of a home win by about
+`r round(or_strength_01, 2)`. Playoff games were not significantly different from regular-season games.
+
+The prediction table makes this easier to read: for two evenly matched teams, the model
+predicts the home team wins about 58% of the time with a full crowd, but only about 50%
+in a home arena without fans, which is essentially no advantage at all.
+
+## Linear regression on point margin
+
+```{r lm}
+lm_margin <- lm(margin ~ crowd + strength_diff + playoffs, data = games)
+summary(lm_margin)
+```
+
+```{r lm-numbers, include=FALSE}
+b <- coef(lm_margin)
+```
+
+The intercept (`r round(b["(Intercept)"], 2)`) means that when two evenly matched teams play
+a regular-season game in front of a full crowd, the home team wins by about
+`r round(b["(Intercept)"], 1)` points on average. Without fans in the home arena, this margin
+drops by about `r round(-b["crowdHome arena, no fans"], 1)` points (p < 0.001), which wipes
+out the home advantage almost completely. The bubble coefficient
+(`r round(b["crowdBubble (neutral, no fans)"], 1)`) points the same way but is only borderline
+significant (p ≈ 0.05). These results agree with the logistic model. Interestingly, playoff
+games show a slightly larger home margin (about `r round(b["playoffsTRUE"], 1)` extra points),
+even though the playoff effect on win probability was not significant.
+
+The model's R² is only `r round(summary(lm_margin)$r.squared, 2)`, so most of the variation in
+point margin is unexplained. This is expected: individual games depend on injuries, hot
+shooting, and luck. Our goal is to estimate the crowd effect, not to predict single games.
+
+## Model diagnostics
+
+```{r diagnostics, fig.height = 7}
+par(mfrow = c(2, 2))
+plot(lm_margin)
+par(mfrow = c(1, 1))
+```
+
+```{r vif}
+vif(lm_margin)   # GVIF^(1/(2*Df)) 小于 ~2 说明没有严重的多重共线性
+```
+
+```{r logit-calibration}
+# Logistic 回归的校准检查：把预测概率分成 10 组，比较预测胜率和实际胜率
+games |>
+  mutate(pred = predict(logit, type = "response"),
+         bin  = ntile(pred, 10)) |>
+  group_by(bin) |>
+  summarise(predicted = mean(pred), observed = mean(home_win)) |>
+  ggplot(aes(predicted, observed)) +
+  geom_abline(linetype = "dashed", color = "grey50") +
+  geom_point(size = 3, color = "#1d428a") +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(x = "Mean predicted P(home win)", y = "Observed home win rate",
+       title = "Calibration of the logistic model (deciles)")
+```
+
+The residuals vs. fitted plot shows no clear pattern, so the linear form looks reasonable
+and the variance is roughly constant. The Q-Q plot follows the line closely, with only slightly
+heavier tails (a few blowout games), which is not a concern with over 14,000 observations.
+No single game has high leverage. All VIF values are close to 1, so there is no
+multicollinearity. For the logistic model, the calibration points lie almost exactly on the
+diagonal, meaning the predicted probabilities match the observed win rates well.
+
+One assumption that is not perfectly met is **independence**: games involving the same team
+in the same season are related. This could make our standard errors a little too small, but
+it is unlikely to change the main conclusion given how small the p-values are.
+
+# Discussion
+
+**1. Was the home win rate lower without fans?** Yes. Home teams won about 57% of games
+with a full crowd but only about 50% in their own arena without fans. In other words,
+home-court advantage did not just shrink; it basically disappeared.
+
+**2. Does this hold after controlling for team strength?** Yes. Adding `strength_diff` and a
+playoff indicator barely changed the result. Both the logistic and linear models show a
+significant drop in home performance without fans, so the effect is not explained by
+which teams happened to play at home.
+
+**3. Does the home arena still help without fans?** Not really. Teams playing in their own
+arena without fans did about as well as "home" teams in the neutral-site bubble. If travel
+and arena familiarity were major factors, home teams without fans should have done clearly
+better than bubble teams, but they did not. This points to **the crowd itself** as the main
+source of home-court advantage, possibly through motivating players, distracting opponents,
+or influencing referees.
+
+That said, the pre-existing downward trend means part of the gap may not be caused by the
+missing fans. Even compared with the post-COVID seasons (`r scales::percent(post_pct, 0.1)`
+home wins), the no-fan games still show a drop of about 5 percentage points, so the crowd
+effect appears to be real, just likely smaller than the raw comparison with all full-crowd
+games suggests.
+
+## Limitations
+
+- **Not a randomized experiment.** The no-fan games happened during a pandemic, when
+  schedules, rest, health protocols and player availability were all unusual.
+- **Pre-existing trend.** Home win rates were already drifting down before COVID, so part of the
+  difference may reflect a long-run trend rather than the absence of fans.
+- **Team strength measure.** Season winning percentage includes the game being predicted and
+  partly reflects home/away performance itself; a better control might use pre-game ratings or betting lines.
+- **Attendance data quality.** Attendance is as reported by ESPN and may contain errors.
+- **Small samples** for the bubble (`r nrow(bubble)` games) give wide confidence intervals.
+
+- **Timing is confounded with crowd condition.** Most no-fan games happened early in the
+  2020–21 season, and fans gradually returned later. Any changes over the season (e.g. teams
+  adjusting to new protocols) are mixed in with the crowd effect.
+- **Independence.** Games involving the same teams are not fully independent, which may
+  make the standard errors slightly too small.
+
+# Conclusion
+
+Using more than 14,000 NBA games from 2015 to 2025, we found that home-court advantage
+almost completely disappeared when games were played without fans. This result holds after
+controlling for team strength, and home teams without fans performed about the same as
+teams in the neutral-site bubble. Together, this suggests that crowds, rather than travel
+or arena familiarity, drive most of the home-court advantage. However, home advantage was
+already declining before COVID, so future work could use pre-game betting lines or a
+longer time series to separate the crowd effect from this long-term trend.
+
+# References
+
+- Gilani, S., et al. *hoopR: Access Men's Basketball Play by Play Data*. R package. https://hoopR.sportsdataverse.org
+- ESPN NBA game data, 2014–15 to 2024–25 seasons.
